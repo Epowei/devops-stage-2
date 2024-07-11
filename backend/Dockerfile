@@ -1,15 +1,25 @@
-FROM python:3.11
+# Use an official Python runtime as a parent image
+FROM python:3.10
 
-RUN pip install poetry
+RUN set -xe
 
+# Install Poetry
+RUN curl -sSL https://install.python-poetry.org | python3 - --git https://github.com/python-poetry/poetry.git@master
+
+ENV PATH="/root/.local/bin:$PATH"
+
+RUN poetry --version
+# RUN poetry new foobar
+
+# Set up the working directory
 WORKDIR /app
 
-COPY pyproject.toml poetry.lock ./
+# Copy and install dependencies
+COPY . /app
 
-RUN poetry install --no-root
+RUN poetry install
 
-COPY . .
+EXPOSE 8000
 
-ENV PYTHONPATH=/app
-
-CMD poetry run bash ./prestart.sh; poetry run uvicorn app.main:app --host 0.0.0.0 --port 8000
+# Start the application
+CMD ["bash", "-c", "poetry run bash ./prestart.sh && poetry run uvicorn app.main:app --reload --host 0.0.0.0"]
