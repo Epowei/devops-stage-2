@@ -1,0 +1,99 @@
+name: pull request Deployment
+
+on:
+  pull_request:
+    types: [opened, synchronized, reopened, closed]
+
+jobs:
+  deploy:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    outputs:
+      deployment_status: ${{ steps.set_status.outputs.deployment_status }}
+  
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up SSH
+      uses: webfactory/ssh-agent@v0.5.3
+      with:
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+    - name: Build container
+      id: build
+      run: |
+        docker build -t pr-${{ github.event.number }} . || echo "build_failed=true" >> $GITHUB_ENV
+
+    - name: Deploy or update container on EC2
+      id: deploy
+      run: |
+        SSH_HOST=${{ secrets.EC2_HOST }}
+        SSH_USER=${{ secrets.EC2_USER }}
+        CONTAINER_NAME=pr-${{ github.event.number }}
+        
+        ssh $SSH_USER@$SSH_HOST << 'EOF'
+          RUNNING=$(docker ps --filter "name=$CONTAINER_NAME" -q)
+          if [ -n "$RUNNING" ]; then
+            echo "Container $CONTAINER_NAME is running, updating..."
+            docker stop $CONTAINER_NAME || echo "deploy_failed=true" >> $GITHUB_ENV
+            docker rm $CONTAINER_NAME || echo "deploy_failed=true" >> $GITHUB_ENV
+          else
+            echo "Creating a new container $CONTAINER_NAME"
+          fi
+          docker run -d --name $CONTAINER_NAME -p 80:80 pr-${{ github.event.number }} || echo "deploy_failed=true" >> $GITHUB_ENV
+        EOF
+
+    - name: Set deployment status
+      id: set_status
+      run: |
+        if [ -f $GITHUB_ENV ]; then
+          if grep -q "build_failed=true" $GITHUB_ENV; then
+            echo "Deployment failed during build."
+            echo "::set-output name=deployment_status::failure"
+          elif grep -q "deploy_failed=true" $GITHUB_ENV; then
+            echo "Deployment failed during container deployment."
+            echo "::set-output name=deployment_status::failure"
+          else
+            echo "Deployment successful."
+            echo "::set-output name=deployment_status::success"
+          fi
+        else
+          echo "::set-output name=deployment_status::unknown"
+        fi
+
+  notify:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: ${{ needs.deploy.outputs.deployment_status }} == 'failure' || ${{ needs.deploy.outputs.deployment_status }} == 'success'
+
+    steps:
+    - name: Notify GitHub bot
+      run: |
+        curl -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "body": "Deployment status: ${{ needs.deploy.outputs.deployment_status }}, Pull request: pr-${{ github.event.number }}"
+          }' \
+        https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.number }}/comments
+      
+  cleanup:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Set up SSH
+      uses: webfactory/ssh-agent@v0.5.3
+      with:
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+    - name: Remove container on EC2
+      run: |
+        SSH_HOST=${{ secrets.EC2_HOST }}
+        SSH_USER=${{ secrets.EC2_USER }}
+        CONTAINER_NAME=pr-${{ github.event.number }}
+        
+        ssh $SSH_USER@$SSH_HOST << 'EOF'
+          docker stop $CONTAINER_NAME
+          docker rm $CONTAINER_NAME
+        EOF
